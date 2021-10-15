@@ -1,0 +1,280 @@
+
+remove(list=ls())
+cat("\f")
+
+#install.packages("devtools")
+#install.packages("covid19.analytics")
+#install.packages("forecast")
+library(devtools)
+devtools::install_github("drsimonj/ourworldindata")
+library(ourworldindata)
+library(ggplot2)
+library(stargazer)
+library(covid19.analytics)
+library(readr)
+library(dplyr)
+library(plyr)
+library(plotly)
+library(crosstalk)
+library(forecast)
+library(ggplot2)
+library(tidyverse)
+library(wbstats)
+library(plm)
+library(lubridate)
+library(car)
+
+# Set Working Directory
+dir <- 
+  "C:/Users/kylia/OneDrive/Msc BAM/Advanced Statistics and Programming/Group assignment/Group assignment/"
+
+dirProg<- paste0(dir, "Programs/")
+dirData<- paste0(dir, "Data/")
+dirRslt<- paste0(dir, "Figures/")
+
+#-------------------------------------------------------------------------
+# Hofstede Dimensions
+#-------------------------------------------------------------------------
+dfHof <- read.csv2(file=paste0(dirData, "Hofstede.csv"))
+dfHof.sub <- subset(dfHof, select = -c(mas, ivr))
+
+#-------------------------------------------------------------------------
+# World Bank Statistics
+#-------------------------------------------------------------------------
+#install.packages("wbstats")
+library(wbstats)
+
+# GDP per capita data
+dfWorld <-wb_data(indicator = c("NY.GDP.PCAP.CD"),
+                  country = "countries_only")
+# Most up to date data is for year 2020
+dfWorld <- dfWorld[dfWorld$date==2020,]
+colnames(dfWorld)[colnames(dfWorld) == "NY.GDP.PCAP.CD"] <- "GDP_per_cap"
+dfWorld.sub = subset(dfWorld, select = -c(iso2c,
+                                          unit,
+                                          obs_status,
+                                          footnote,
+                                          last_updated,
+                                          country,
+                                          date))
+
+#-------------------------------------------------------------------------
+# Vaccination data
+#-------------------------------------------------------------------------
+library(data.table)
+dfVac <- 
+  read.csv(url("https://raw.githubusercontent.com/owid/covid-19-data/master/public/data/vaccinations/vaccinations.csv"))
+
+dfVacc = subset(dfVac, select = -c(location,
+                                   total_vaccinations,
+                                   people_vaccinated,
+                                   total_boosters,
+                                   daily_vaccinations_raw,
+                                   daily_vaccinations,
+                                   people_vaccinated_per_hundred,
+                                   total_boosters_per_hundred,
+                                   daily_vaccinations_per_million,
+                                   total_vaccinations_per_hundred,
+                                   people_fully_vaccinated
+                                   ),
+                date>"2021-04-30")
+
+# Same column names
+colnames(dfWorld.sub)[colnames(dfWorld.sub) == "iso3c"] <- "iso"
+colnames(dfVacc)[colnames(dfVacc) == "iso_code"] <- "iso"
+colnames(dfHof.sub)[colnames(dfHof.sub) == "ctr"] <- "iso"
+
+#-------------------------------------------------------------------------
+# vacc policy data
+#-------------------------------------------------------------------------
+dfPolicy <- read.csv2(file=paste0(dirData, "covid-vaccination-policy.csv"), 
+                      head=TRUE, sep=",")
+dfPol <- dfPolicy
+colnames(dfPol)[colnames(dfPol) == "Day"] <- "date"
+colnames(dfPol)[colnames(dfPol) == "Code"] <- "iso"
+
+# Merge policy and vaccination rate on date and omit other rows
+dfVacRP <- merge(dfPol, dfVacc, by = c("iso", "date"))
+
+# Median age
+dfAge <- read.csv(file = paste0(dirData, "median-age.csv"))
+dfAge <- dfAge[dfAge$Year==2020,]
+colnames(dfAge)[colnames(dfAge) == "Code"] <- "iso"
+dfAge.sub <- subset(dfAge, select = -c(Entity, Year))
+
+# Merge
+dfAll1 <- merge(dfHof.sub, dfVacRP, by="iso")
+dfAll2 <- merge(dfAll1, dfAge, by="iso")
+dfAll <- merge(dfAll2, dfWorld.sub, by= "iso")
+
+# Removing NAs and entries without hofstede dimensions
+dfAll <-dfAll[- grep("#NULL!",dfAll$pdi, dfAll$idv, dfAll$uai, dfAll$ltows),]
+dfAll$date <- as.Date(dfAll$date, format = "%Y-%m-%d")
+dfAll$Year_month <- format(dfAll$date, "%y-%m")
+dfAll$Entity.x<-NULL
+dfAll$Entity.y<-NULL
+dfAll$Year<-NULL
+colnames(dfAll)[colnames(dfAll) ==
+                  "UN.Population.Division..Median.Age...2017."] <- "median_age"
+
+dfAll$GDP_per_cap <- dfAll$GDP_per_cap/1000
+
+dfAll$pdi <- as.numeric(dfAll$pdi)
+dfAll$idv <- as.numeric(dfAll$idv)
+dfAll$uai <- as.numeric(dfAll$uai)
+dfAll$ltowvs <- as.numeric(dfAll$ltowvs)
+
+# Balance
+dfMonth <- dfAll %>%
+  group_by(iso, Year_month) %>%
+  mutate(mvac = max(people_fully_vaccinated_per_hundred))
+
+dfMonth <- dfMonth %>%
+  group_by(iso, Year_month) %>%
+  mutate(mpol = max(vaccination_policy))
+
+dfMonth <- dfMonth %>%
+  distinct(iso, Year_month, .keep_all = TRUE)
+
+dfMonth <- dfMonth[complete.cases(dfMonth),]
+
+dfMonth <-
+  ddply(dfMonth, .(iso), summarise,
+        pdi,
+        ltowvs,
+        idv,
+        uai,
+        mvac,
+        mpol,
+        GDP_per_cap,
+        median_age,
+        date,
+        Year_month,
+        country,
+        numValid         = length(iso))
+
+dfMonth <- dfMonth[dfMonth$numValid == 5,]
+
+stargazer(dfMonth)
+
+# Create averages
+dfWorld.avg <-
+  ddply(dfMonth, .(iso), summarise,
+        avg.mpol   = mean(mpol, na.rm=TRUE),
+        avg.mvac  = mean(mvac, na.rm=TRUE),
+        avg.pdi = mean( pdi, na.rm=TRUE),
+        avg.ltowvs =mean(ltowvs , na.rm=TRUE),
+        avg.idv = mean(idv , na.rm=TRUE),
+        avg.uai =mean(uai , na.rm=TRUE),
+        avg.median_age = mean(median_age , na.rm=TRUE),
+        avg.GDP_per_cap = mean( GDP_per_cap, na.rm=TRUE),
+        numValid         = length(iso))
+
+# Model specification
+mdlD <- mvac ~ pdi + idv + uai +
+  ltowvs + GDP_per_cap + mpol + median_age
+
+mdlVars      <- all.vars(mdlD)
+mdlVars.avg  <- paste0("avg.", mdlVars)
+dfWorld.between <- dfWorld.avg[mdlVars.avg]
+colnames(dfWorld.between) <-
+  gsub("avg\\.", "", colnames(dfWorld.between))
+
+dfWorld.sub <- merge(dfMonth, dfWorld.avg, by= "iso")
+
+# Estimate between variation
+rsltBetween <- lm(mdlD, data=dfWorld.between)
+stargazer(rsltBetween, type = "text")
+
+rsltRE.mdlD <- plm(mdlD, data = dfMonth,
+                   index=c("country","date"), model = "random")
+stargazer(rsltRE.mdlD, type = "text",
+          intercept.bottom = FALSE)
+
+rslt.Pooling <- lm(mdlD, data = dfMonth)
+
+lmtest::bptest(rsltRE.mdlD)
+lmtest::bptest(rslt.Pooling)
+lmtest::bptest(rsltBetween)
+seWhite1 <- sqrt(diag(vcovHC(rslt.Pooling, type = "HC0")))
+seWhite3 <- sqrt(diag(vcovHC(rsltRE.mdlD, type = "HC0")))
+
+stargazer(rslt.Pooling, rsltBetween, rsltRE.mdlD,
+          se = list(seWhite1, NULL, seWhite3),
+          intercept.bottom = FALSE)
+
+# For MEDC
+dfMonth.MEDC <- dfMonth[dfMonth$GDP_per_cap >= 16.194,]
+dfWorld.between.MEDC <- 
+  dfWorld.between[dfWorld.between$GDP_per_cap>= 16.194,]
+
+# Just to see which countries are not in MEDC
+dfMonth.LEDC <- dfMonth[dfMonth$GDP_per_cap<16.194,]
+
+rsltRE.mdlD.MEDC <- plm(mdlD, data = dfMonth.MEDC,
+                   index=c("iso","date"), model = "random")
+rsltBetween.MEDC <- lm (mdlD, data=dfWorld.between.MEDC)
+rslt.Pooling.MEDC <- lm(mdlD, data = dfMonth.MEDC)
+
+lmtest::bptest(rsltRE.mdlD.MEDC)
+lmtest::bptest(rslt.Pooling.MEDC)
+lmtest::bptest(rsltBetween.MEDC)
+
+# Test for Multicollinearity
+vifPool <- vif(rslt.Pooling)
+stargazer(vifPool, type = "text")
+vifBetween <- vif(rsltBetween)
+vifRE <- vif(rsltRE.mdlD)
+
+vifPoolMEDC <- vif(rslt.Pooling.MEDC)
+vifBetweenMEDC <- vif(rsltBetween.MEDC)
+vifREMEDC <- vif(rsltRE.mdlD.MEDC)
+
+vifall <- rbind(vifPool, vifBetween, vifRE, vifPoolMEDC, vifBetweenMEDC, 
+                vifREMEDC)
+stargazer(vifall)
+
+# Test for heteroskedasticity with Breusch Pagan test
+lmRE<- (lmtest::bptest(rsltRE.mdlD)$p.value)
+lmPool <- (lmtest::bptest(rslt.Pooling)$p.value)
+lmBetween <- (lmtest::bptest(rsltBetween)$p.value)
+lmREMEDC <- (lmtest::bptest(rsltRE.mdlD.MEDC)$p.value)
+lmPoolMEDC <- (lmtest::bptest(rslt.Pooling.MEDC)$p.value)
+lmBetweenMEDC <- (lmtest::bptest(rsltBetween.MEDC)$p.value)
+lmall <- cbind(lmRE, lmPool, lmBetween, lmREMEDC, lmPoolMEDC, lmBetweenMEDC)
+
+stargazer(lmall)
+
+stargazer(rslt.Pooling.MEDC, rsltBetween.MEDC, rsltRE.mdlD.MEDC,
+          intercept.bottom = FALSE)
+
+# Plots
+ggplot(data=dfMonth, aes(x = GDP_per_cap, y = mvac)) + 
+  geom_point() + labs(title = "Vaccinations and GDP",
+                      x = "GDP per capita", 
+                      y = "Fully vaccinated people per hundred") +
+  theme(axis.title = element_text(size=rel(1.2)), 
+        axis.text = element_text(size=rel(1.2))) +
+  geom_smooth(method="lm", se=FALSE, colour="blue") +
+  guides(colour = guide_legend(override.aes = list(size = 5)))
+ggsave(paste0(dirRslt, "Vacc_GDP.png"),
+       width=8, height=6)
+
+ggplot(data=dfMonth, aes(x = median_age, y = mvac)) + 
+  geom_point() + labs(title = "Vaccinations and Age",
+                      x = "Median Age per country", 
+                      y = "Fully vaccinated people per hundred") +
+  theme(axis.title = element_text(size=rel(1.2)), 
+        axis.text = element_text(size=rel(1.2))) +
+  geom_smooth(method="lm", se=FALSE, colour="blue") +
+  guides(colour = guide_legend(override.aes = list(size = 5)))
+ggsave(paste0(dirRslt, "Vacc_age.png"),
+       width=8, height=6)
+
+ggplot(data = dfMonth, aes(x = mpol, y = mvac)) +
+  geom_point() + labs(title="Vaccinations and Policies",
+                      x = "Vaccination policy", 
+                      y = "Fully vaccinated people per hundred")+
+  theme_classic()  +  geom_smooth(method=lm)
+ggsave(paste0(dirRslt, "Vacc_Pol.png"),
+       width=8, height=6)
